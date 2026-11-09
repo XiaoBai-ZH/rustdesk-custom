@@ -522,6 +522,14 @@ pub fn check_ws(endpoint: &str) -> String {
     };
     let protocol = if is_domain {
         let api_server = Config::get_option("api-server");
+        // The option is empty when the server was baked in at compile time instead of being
+        // entered by the user, so fall back to the same env the main crate reads. Without this
+        // the scheme silently downgrades to ws:// and an HTTPS-only reverse proxy is unreachable.
+        let api_server = if api_server.is_empty() {
+            option_env!("API_SERVER").unwrap_or("").to_owned()
+        } else {
+            api_server
+        };
         if api_server.starts_with("https") {
             "wss"
         } else {
