@@ -2042,6 +2042,13 @@ jobs:
           arch: ${{ matrix.job.arch }}
           distro: ${{ matrix.job.distro }}
           githubToken: ${{ github.token }}
+          # Workflow-level env does not cross into the container: run-on-arch-action only
+          # forwards what is declared here. Without it the in-container cargo build compiles
+          # hbb_common with no custom server and silently falls back to the upstream defaults.
+          env: |
+            RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+            RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+            API_SERVER: ${{ secrets.API_SERVER }}
           setup: |
             ls -l "${PWD}"
             ls -l /opt/artifacts/vcpkg/installed
@@ -2363,6 +2370,13 @@ jobs:
           arch: x86_64
           distro: ubuntu18.04
           githubToken: ${{ github.token }}
+          # Workflow-level env does not cross into the container: run-on-arch-action only
+          # forwards what is declared here. Without it the in-container cargo build compiles
+          # hbb_common with no custom server and silently falls back to the upstream defaults.
+          env: |
+            RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+            RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+            API_SERVER: ${{ secrets.API_SERVER }}
           setup: |
             ls -l "${PWD}"
             ls -l /opt/artifacts/vcpkg/installed
@@ -2655,6 +2669,13 @@ jobs:
           arch: ${{ matrix.job.arch }}
           distro: ${{ matrix.job.distro }}
           githubToken: ${{ github.token }}
+          # Workflow-level env does not cross into the container: run-on-arch-action only
+          # forwards what is declared here. Without it the in-container cargo build compiles
+          # hbb_common with no custom server and silently falls back to the upstream defaults.
+          env: |
+            RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+            RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+            API_SERVER: ${{ secrets.API_SERVER }}
           setup: |
             ls -l "${PWD}"
           dockerRunArgs: |
@@ -2927,6 +2948,13 @@ jobs:
           arch: ${{ matrix.job.arch }}
           distro: ${{ matrix.job.distro }}
           githubToken: ${{ github.token }}
+          # Workflow-level env does not cross into the container: run-on-arch-action only
+          # forwards what is declared here. Without it the in-container cargo build compiles
+          # hbb_common with no custom server and silently falls back to the upstream defaults.
+          env: |
+            RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+            RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+            API_SERVER: ${{ secrets.API_SERVER }}
           setup: |
             ls -l "${PWD}"
           dockerRunArgs: |
