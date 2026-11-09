@@ -1,0 +1,10 @@
+name: ZZ Perm Callee
+on:
+  workflow_call:
+jobs:
+  needs-write:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - run: echo perm-callee-ok

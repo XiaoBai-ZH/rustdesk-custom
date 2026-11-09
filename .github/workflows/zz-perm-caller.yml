@@ -1,0 +1,7 @@
+name: ZZ Perm Caller
+on:
+  workflow_dispatch:
+jobs:
+  call:
+    uses: ./.github/workflows/zz-perm-callee.yml
+    secrets: inherit
