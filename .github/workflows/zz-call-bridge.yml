@@ -1,6 +1,0 @@
-name: ZZ Call Bridge
-on:
-  workflow_dispatch:
-jobs:
-  call-bridge:
-    uses: ./.github/workflows/bridge.yml

@@ -1,8 +1,0 @@
-name: ZZ L3
-on:
-  workflow_call:
-jobs:
-  ping3:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo level3-ok

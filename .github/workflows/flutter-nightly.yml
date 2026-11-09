@@ -1,14 +1,17 @@
 name: Flutter Nightly Build
 
 on:
-  schedule:
-    # schedule build every night
-    - cron: "0 0 * * *"
   workflow_dispatch:
 
 jobs:
   run-flutter-nightly-build:
     uses: ./.github/workflows/flutter-build.yml
+    # The callee declares `permissions: contents: write` on generate-sbom and
+    # publish-signed-update-metadata. A reusable workflow's token cannot exceed what its
+    # caller grants, and this repo's default_workflow_permissions is read-only, so without
+    # this block the run dies as startup_failure with zero jobs created.
+    permissions:
+      contents: write
     secrets: inherit
     with:
       upload-artifact: true

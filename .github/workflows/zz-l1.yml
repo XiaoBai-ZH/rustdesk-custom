@@ -1,7 +1,0 @@
-name: ZZ L1 Nested
-on:
-  workflow_dispatch:
-jobs:
-  call2:
-    uses: ./.github/workflows/zz-l2.yml
-    secrets: inherit

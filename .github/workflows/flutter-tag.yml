@@ -12,6 +12,10 @@ on:
 jobs:
   run-flutter-tag-build:
     uses: ./.github/workflows/flutter-build.yml
+    # Same reason as flutter-nightly.yml: the callee needs contents:write and a reusable
+    # workflow cannot exceed the permissions its caller grants.
+    permissions:
+      contents: write
     secrets: inherit
     with:
       upload-artifact: true

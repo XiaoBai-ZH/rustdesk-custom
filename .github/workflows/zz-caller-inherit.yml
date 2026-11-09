@@ -1,7 +1,0 @@
-name: ZZ Caller Inherit
-on:
-  workflow_dispatch:
-jobs:
-  call:
-    uses: ./.github/workflows/zz-callee.yml
-    secrets: inherit

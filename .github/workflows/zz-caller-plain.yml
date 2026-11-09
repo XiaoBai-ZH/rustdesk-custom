@@ -1,6 +1,0 @@
-name: ZZ Caller Plain
-on:
-  workflow_dispatch:
-jobs:
-  call:
-    uses: ./.github/workflows/zz-callee.yml
