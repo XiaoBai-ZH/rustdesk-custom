@@ -4,4 +4,6 @@ on:
 jobs:
   call:
     uses: ./.github/workflows/zz-perm-callee.yml
+    permissions:
+      contents: write
     secrets: inherit
