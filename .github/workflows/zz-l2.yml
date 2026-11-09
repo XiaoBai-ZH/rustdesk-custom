@@ -1,0 +1,6 @@
+name: ZZ L2
+on:
+  workflow_call:
+jobs:
+  call3:
+    uses: ./.github/workflows/zz-l3.yml
