@@ -1,0 +1,7 @@
+name: ZZ Env Caller
+on:
+  workflow_dispatch:
+jobs:
+  call:
+    uses: ./.github/workflows/zz-env-callee.yml
+    secrets: inherit
