@@ -59,7 +59,7 @@ gh auth status
 **Token scopes 必须包含 `repo` 和 `workflow`。** 缺 `workflow` 会导致无法通过 API 修改 `.github/workflows/*.yml`（报 `refusing to allow an OAuth App to create or update workflow`）。补齐：
 
 ```bash
-gh auth refresh -h github.com -s repo -s workflow
+gh auth refresh -h github.com -s repo,workflow
 ```
 
 ### 2.2 两个必须用内联 `-c` 绕开的本机配置问题
@@ -105,13 +105,17 @@ echo "② RS_PUB_KEY:             $(grep -c 'pub const RS_PUB_KEY: &str = "OeVuK
 echo "③ websocket api_server:   $(grep -c 'let api_server = Config::get_option("api-server");' libs/hbb_common/src/websocket.rs)"
 echo "④ get_api_server_ 锚点:   $(grep -c 'let s0 = get_custom_rendezvous_server(custom);' src/common.rs)"
 echo "⑤ SIGN_BASE_URL:          $(grep -c 'SIGN_BASE_URL: "\${{ secrets.SIGN_BASE_URL }}-2"' .github/workflows/flutter-build.yml)"
-echo "⑥ run-on-arch 处数:       $(grep -c 'run-on-arch-action' .github/workflows/flutter-build.yml)"
+echo "⑥ run-on-arch 处数:       $(grep -c 'uses: rustdesk-org/run-on-arch-action' .github/workflows/flutter-build.yml)"
 echo "⑦ env+setup 模式处数:     $(python3 -c "s=open('.github/workflows/flutter-build.yml').read(); print(s.count('          githubToken: \${{ github.token }}\n          setup: |\n'))")"
 echo "⑧ create unsigned dmg:    $(grep -c 'name: create unsigned dmg' .github/workflows/flutter-build.yml)"
 echo "⑨ build.py 拷 service:    $(grep -c 'cp -rf ../target/release/service' build.py)"
 ```
 
-**期望**：①④⑤⑧⑨ 各为 `1`，③ 为 `1`，⑥ 与 ⑦ **相等**（1.5.3 时都是 4）。
+**期望**：①②③④⑤⑧⑨ 各为 `1`，⑥ 与 ⑦ **相等**（1.5.3 时都是 `4`）。
+
+已在 pristine 上游 1.5.3 上实测，输出为 `①1 ②1 ③1 ④1 ⑤1 ⑥4 ⑦4 ⑧1 ⑨1`。
+
+⚠️ **⑥ 必须用 `uses: rustdesk-org/run-on-arch-action` 这个精确模式**，不能用宽松的 `run-on-arch-action`——补丁 ⑥ 自己加的注释里也含这个词，打完补丁后宽松模式会数出 8 而不是 4。
 
 任一为 0 → 上游改了这处，**停下来读上下文重新设计补丁**。⑥≠⑦ → 说明有新的 `run-on-arch-action` 用法不符合该模式，必须逐个人工确认。
 
@@ -195,6 +199,12 @@ pub const RS_PUB_KEY: &str = match option_env!("RS_PUB_KEY") {
 ```
 
 **⑥ 4 处 `run-on-arch-action` 加 `env:` 输入**
+
+分属 `build-rustdesk-linux`、`build-rustdesk-linux-drm`、`build-rustdesk-linux-sciter`、`build-flatpak`。**用 grep 定位，不要记行号**（补丁 ⑤ 和 ⑥ 自身都会让行号位移）：
+
+```bash
+grep -n "uses: rustdesk-org/run-on-arch-action" .github/workflows/flutter-build.yml
+```
 
 四处模式完全一致，可一次性全局替换（替换前用 3.0 的 ⑥⑦ 确认处数相等）：
 
@@ -515,7 +525,46 @@ gh api "/repos/$R/actions/runs/$RID/jobs?per_page=100" \
 
 ## 7. 验证产物（必做，构建全绿 ≠ 产物正确）
 
-> **上次踩过的最贵的坑**：构建 27 个 job 全绿，但 Linux 全部产物烧的是官方服务器（坑 #6 的容器 env）。**必须逐平台验证二进制。**
+> **上次踩过的最贵的坑**：构建 27 个 job 全绿，但 Linux 全部产物烧的是官方服务器（坑 #5）。**构建成功不代表产物正确。**
+
+### 7.0 分级验证策略：不是每次都要下载全部安装包
+
+| 级别 | 何时用 | 做什么 | 成本 |
+|---|---|---|---|
+| **T0 零下载** | 补丁未变、只是重跑 | 3.0 锚点自检 + 构建全绿 + `gh secret list` 确认 3 个 Secret 在位 | 0 |
+| **T1 单平台** | **常规推荐** | 只下 Linux `.deb`（最好解析）验一遍烧入值 | 24MB |
+| **T2 全平台** | 首次搭建 / 改过任何补丁 / 上游大版本跳跃 | 四平台全验 + macOS 签名校验 | ~150MB |
+
+**为什么 T1 通常够**：4 处源码补丁是**全平台共用**的同一份代码，`option_env!` 是编译期确定的。只要有一个平台的二进制里值正确，就说明补丁本身生效了。
+
+**但 T1 不足以覆盖的两类问题**（这正是上次踩的坑）：
+- **平台特有的传递断链**：坑 #5 就是 Linux 独有（容器不继承 env），其他三个平台全对。所以**改过补丁 ⑥ 之后必须验 Linux**。
+- **打包环节的问题**：坑 #7 是 macOS 独有（签名封印），二进制内容完全正确但包装坏了。所以**改过补丁 ⑦ 之后必须验 macOS 签名**。
+
+**结论**：补丁不变 → T1；补丁有变 → 变动涉及哪个平台就加验哪个；首次或大版本 → T2。
+
+### 7.0.1 可选增强：把验证搬进 CI，彻底免掉下载
+
+在每个平台的构建 job 末尾加一步自检，值没烧进去就让 job 直接失败。**只校验公钥**——它 44 字符，在四个平台的二进制里都是连续存储（已实测：Windows `librustdesk.dll`、Linux/Android `librustdesk.so`、macOS `liblibrustdesk.dylib` 各 1 次命中），不像域名在 macOS 上会被拆成 `movabs` 立即数。
+
+```yaml
+      - name: Verify custom server is baked in
+        if: env.UPLOAD_ARTIFACT == 'true'
+        env:
+          BIN: <该平台的 librustdesk.so / .dll / .dylib 路径>
+        run: |
+          if [ -z "$RS_PUB_KEY" ]; then
+            echo "::error::RS_PUB_KEY secret 为空，产物会连官方服务器"; exit 1
+          fi
+          if ! strings -a "$BIN" | grep -qF "$RS_PUB_KEY"; then
+            echo "::error::烧入的公钥不在 $BIN 里"; exit 1
+          fi
+          echo "OK 公钥已烧入"
+```
+
+Secret 值在日志里会被 GitHub 自动打码，`grep -qF` 也不输出内容，所以不会泄露。
+
+加了这一步之后 T0 就够了——构建绿即产物正确。**代价是需要改 4~6 个 job，且要跑一轮构建验证这步本身没写错。** 本次未实施，留作后续优化。
 
 ### 7.1 下载（必须断点续传 + digest 校验）
 
@@ -527,11 +576,15 @@ gh api "/repos/$R/releases/tags/nightly" --jq '.assets[]|{name:.name,size:.size,
 # 断点续传下载（单线程！不要并发写同一文件）
 F=rustdesk-<ver>-x86_64.deb; EXPECT=<上面查到的size>
 for i in $(seq 1 10); do
-  [ "$(stat -f%z $F 2>/dev/null||echo 0)" -ge "$EXPECT" ] && break
-  curl -sL -C - -o $F "https://github.com/$R/releases/download/nightly/$F"
+  [ "$(wc -c < "$F" 2>/dev/null || echo 0)" -ge "$EXPECT" ] && break
+  curl -sL -C - -o "$F" "https://github.com/$R/releases/download/nightly/$F"
 done
-shasum -a 256 $F    # 与 digest 比对，必须完全一致
+# 校验（sha256sum=Linux，shasum=macOS，两者取其一）
+(sha256sum "$F" 2>/dev/null || shasum -a 256 "$F") | awk '{print $1}'
+# 必须与上面 digest 字段去掉 "sha256:" 前缀后完全一致
 ```
+
+> **可移植性注意**：`wc -c < file` 在 macOS 和 Linux 都可用；不要用 `stat -f%z`（BSD 专用，Linux 报 `illegal option -- c`）或 `stat -c%s`（GNU 专用，macOS 报错）。同理校验和用上面的 `sha256sum || shasum -a 256` 兜底写法。
 
 ⚠️ `gh release download` 和 `gh api .../zip` 在大文件上实测会截断，**不要依赖它们**，用上面的 curl 续传。
 
@@ -575,6 +628,8 @@ strings -a winx/librustdesk.dll | grep -c "<你的域名>"
 ```
 
 ### 7.6 macOS（有两个陷阱）
+
+> 本节全部命令（`hdiutil` / `codesign` / `plutil` / `spctl`）**只能在 macOS 上跑**。若执行机是 Linux，跳过本节，改为在交付时让用户自行执行第 8 节的 macOS 命令，或改用一台 Mac 做这一步验证。
 
 ```bash
 hdiutil attach -nobrowse -readonly rustdesk-*-aarch64.dmg
@@ -758,39 +813,82 @@ openssl pkcs7 -inform DER -in /tmp/c.rsa -print_certs -noout
 
 ---
 
-## 11. 关键代码位置索引（1.5.3 行号，仅供定位参考，会随上游变动）
+## 11. 关键代码位置索引
 
-| 用途 | 位置 |
-|---|---|
-| 服务器优先级链 | `libs/hbb_common/src/config.rs:1049` `get_rendezvous_server()` |
-| 服务器列表（喂给 mediator，**不补端口**） | `libs/hbb_common/src/config.rs:1072` `get_rendezvous_servers()` |
-| 烧入点 ① PROD | `libs/hbb_common/src/config.rs:69` |
-| 烧入点 ② 公钥 | `libs/hbb_common/src/config.rs:117` |
-| 末级兜底常量（不要改） | `libs/hbb_common/src/config.rs:116` `RENDEZVOUS_SERVERS` |
-| 端口常量 21116/21117/21118/21119 | `libs/hbb_common/src/config.rs:119-123` |
-| API 解析 | `src/common.rs:1270` `get_api_server()` / `:1287` `get_api_server_()` |
-| 烧入点 ④ API | `src/common.rs:1297`（补丁插入位置） |
-| API 推导用的 custom server | `src/common.rs:1253` `get_custom_rendezvous_server()` |
-| 端口 ±N / 补端口 | `libs/hbb_common/src/socket_client.rs` `increase_port()` / `check_port()` |
-| Key 解析 | `src/common.rs:2163` `get_key()` |
-| 握手验签 | `src/client.rs:1655` `secure_connection()` / `src/common.rs:2433` `decode_id_pk_dtls()` |
-| WebSocket 端点转换 | `libs/hbb_common/src/websocket.rs:470` `check_ws()`（`:471` 有 `if !use_ws() return`） |
-| 烧入点 ③ ws/wss | `libs/hbb_common/src/websocket.rs:524` |
-| 自有服务器白名单（含 PROD） | `libs/hbb_common/src/websocket.rs:544-548` |
-| WebSocket 总闸 | `libs/hbb_common/src/config.rs:2948` `use_ws()` / `:2928` `option2bool()`（`allow-*` 前缀 → `value=="Y"`，默认关） |
-| 连接目标解析 | `libs/hbb_common/src/socket_client.rs:140` |
-| 中继解析 | `src/rendezvous_mediator.rs:1367` `get_relay_server()` |
-| mediator 启动 | `src/rendezvous_mediator.rs:317` `start_all()` |
-| 配置改动触发重启 | `src/ipc.rs:795` `CheckIfRestart`（`:834` 监听 api-server） |
-| API 下发黑名单（保护烧入值不被服务端覆盖） | `src/hbbs_http/sync.rs:295` `BLOCKED_CONFIG_OPTIONS` |
-| custom.txt 验签（自建用不了） | `src/common.rs:2607` `read_custom_client()` |
-| exe 文件名解析（仅 Windows） | `src/custom_server.rs:44` / `src/naming.rs` |
-| **破坏 macOS 签名的那行** | `build.py:949` |
-| macOS 重签脚本 | `.github/scripts/sign-macos-app.sh` |
-| macOS 签名步骤的跳过条件 | `flutter-build.yml` `env.MACOS_P12_BASE64 != null` |
-| `SIGN_BASE_URL` 的 `-2` 技巧（不要设这个 Secret） | `flutter-build.yml:63` |
-| 4 处容器构建 | `flutter-build.yml:2037 / 2359 / 2651 / 2923` |
-| 状态提示「正在接入 RustDesk 网络...」 | `src/lang/cn.rs:10` `connecting_status` ← `flutter/lib/desktop/pages/connection_page.dart:174` ← `status_num==0` ← 服务进程 `OnlineStatus`（反映 **ID 服务器**连通状态，不是 API） |
+> ⚠️ **不要依赖行号。** 下表「参考行号」是**本仓库打过补丁后**的 1.5.3 实际行号（不是上游行号——补丁 ①② 让 `config.rs` 位移 +10 行，补丁 ④ 让 `src/common.rs` 位移 +5 行）。上游一更新就全部失效。
+> **定位请用「grep 模式」列**，它对版本漂移免疫。
+
+| 用途 | 文件 | grep 模式 | 参考行号 |
+|---|---|---|---|
+| 服务器优先级链 | `libs/hbb_common/src/config.rs` | `pub fn get_rendezvous_server()` | 1059 |
+| 服务器列表（喂给 mediator，**不补端口**） | 同上 | `pub fn get_rendezvous_servers()` | 1082 |
+| 烧入点 ① PROD | 同上 | `PROD_RENDEZVOUS_SERVER: RwLock<String>` | 69 |
+| 烧入点 ② 公钥 | 同上 | `pub const RS_PUB_KEY` | 124 |
+| 末级兜底常量（**不要改**） | 同上 | `pub const RENDEZVOUS_SERVERS` | 122 |
+| 端口常量 21116/21117/21118/21119 | 同上 | `pub const RENDEZVOUS_PORT` | 129 |
+| WebSocket 总闸 | 同上 | `pub fn use_ws()` | 2948 |
+| 选项转 bool（`allow-*` → `value=="Y"`，默认关） | 同上 | `pub fn option2bool` | 2934 |
+| API 解析（外层，含 `:21114` 剥离逻辑） | `src/common.rs` | `pub fn get_api_server(` | 1270 |
+| API 解析（内层，烧入点 ④ 在此） | 同上 | `fn get_api_server_(` | 1287 |
+| 烧入点 ④ 插入位置 | 同上 | `let s0 = get_custom_rendezvous_server(custom);` | 1302 |
+| API 推导用的 custom server | 同上 | `pub fn get_custom_rendezvous_server` | 1253 |
+| Key 解析（烧入点 ② 的消费方） | 同上 | `pub async fn get_key` | 2163 |
+| 审计服务器（走 `get_api_server`，无需改） | 同上 | `pub fn get_audit_server` | 1378 |
+| 握手验签 | 同上 | `pub fn decode_id_pk_dtls` | 2433 |
+| custom.txt 验签（自建用不了） | 同上 | `pub fn read_custom_client` | 2612 |
+| 握手用公钥 | `src/client.rs` | `async fn secure_connection` | 1655 |
+| WebSocket 端点转换（`:471` 有 `if !use_ws() return`） | `libs/hbb_common/src/websocket.rs` | `pub fn check_ws` | 470 |
+| 烧入点 ③ ws/wss 判定 | 同上 | `let api_server = Config::get_option("api-server");` | 524 |
+| WebSocket 端口判定 | 同上 | `fn websocket_port` | 547 |
+| 自有服务器白名单（**含 PROD**，这是烧 PROD 而非常量的理由之一） | 同上 | `let own_servers = \[` | 553 |
+| 端口 ±N | `libs/hbb_common/src/socket_client.rs` | `pub fn increase_port` | 31 |
+| 补默认端口（有 `contains(':')` 保护，无双重端口风险） | 同上 | `pub fn check_port` | 16 |
+| 连接目标解析（`check_ws` 的生产调用点） | 同上 | `let target_str = check_ws` | 140 |
+| 中继解析（第 3 级兜底 = ID 端口 +1） | `src/rendezvous_mediator.rs` | `fn get_relay_server` | 1367 |
+| mediator 启动 | 同上 | `pub async fn start_all` | 312 |
+| 配置改动触发 mediator 重启 | `src/ipc.rs` | `pub struct CheckIfRestart` | 795 |
+| └ 监听 api-server 变化 | 同上 | `self.api_server != Config::get_option` | 834 |
+| API 下发黑名单（保护烧入值不被服务端覆盖） | `src/hbbs_http/sync.rs` | `BLOCKED_CONFIG_OPTIONS` | 295 |
+| exe 文件名解析（仅 Windows，`host=` 分支不验签） | `src/custom_server.rs` | `pub fn get_custom_server_from_string` | 44 |
+| **破坏 macOS 签名的那行** | `build.py` | `cp -rf ../target/release/service` | 949 |
+| macOS 重签脚本（补丁 ⑦ 复用它） | `.github/scripts/sign-macos-app.sh` | — | — |
+| macOS 签名步骤的跳过条件 | `.github/workflows/flutter-build.yml` | `MACOS_P12_BASE64 != null` | — |
+| `SIGN_BASE_URL` 的 `-2` 技巧（**不要设这个 Secret**） | 同上 | `SIGN_BASE_URL: ` | 63 |
+| 4 处容器构建（补丁 ⑥） | 同上 | `uses: rustdesk-org/run-on-arch-action` | 2048/2377/2676/2955 |
+| 状态提示「正在接入 RustDesk 网络...」 | `src/lang/cn.rs` | `connecting_status` | 10 |
+| └ 由 `status_num==0` 驱动 | `flutter/lib/desktop/pages/connection_page.dart` | `SvcStatus.connecting;` | 175 |
+
+**关于最后两行**：`status_num` 来自服务进程的 `OnlineStatus`（`src/ui_interface.rs` 的 `UI_STATUS`），反映的是 **ID 服务器连通状态，不是 API 状态**。所以 API 配置错误也可能表现成这个提示——排查时不要被字面意思带偏（坑 #6 就是这样）。
+
+一次性定位全部（复制即用）：
+
+```bash
+cd <仓库工作树>
+for spec in \
+  "libs/hbb_common/src/config.rs|pub fn get_rendezvous_server()" \
+  "libs/hbb_common/src/config.rs|pub fn get_rendezvous_servers()" \
+  "libs/hbb_common/src/config.rs|pub const RENDEZVOUS_SERVERS" \
+  "libs/hbb_common/src/config.rs|pub fn use_ws()" \
+  "libs/hbb_common/src/config.rs|pub fn option2bool" \
+  "libs/hbb_common/src/websocket.rs|pub fn check_ws" \
+  "libs/hbb_common/src/websocket.rs|fn websocket_port" \
+  "libs/hbb_common/src/socket_client.rs|pub fn increase_port" \
+  "libs/hbb_common/src/socket_client.rs|pub fn check_port" \
+  "src/common.rs|pub fn get_api_server(" \
+  "src/common.rs|fn get_api_server_(" \
+  "src/common.rs|pub fn get_custom_rendezvous_server" \
+  "src/common.rs|pub async fn get_key" \
+  "src/common.rs|pub fn read_custom_client" \
+  "src/client.rs|async fn secure_connection" \
+  "src/rendezvous_mediator.rs|fn get_relay_server" \
+  "src/rendezvous_mediator.rs|pub async fn start_all" \
+  "src/ipc.rs|pub struct CheckIfRestart" \
+  "src/hbbs_http/sync.rs|BLOCKED_CONFIG_OPTIONS" \
+  "build.py|cp -rf ../target/release/service" ; do
+  F="${spec%%|*}"; P="${spec##*|}"
+  printf "  %-46s %-42s L%s\n" "$F" "$P" "$(grep -n "$P" "$F" 2>/dev/null | head -1 | cut -d: -f1)"
+done
+```
 
 ---
 
@@ -798,7 +896,7 @@ openssl pkcs7 -inform DER -in /tmp/c.rsa -print_certs -noout
 
 - 上游 `rustdesk/rustdesk` **1.5.3**，commit `95cca3f661f635b3cc85c04935fe8d96d8f432ef`（tag `1.5.3` 与 master HEAD 同一 commit）
 - `hbb_common` pin `fae47e024dd83cef6aaecde0aa7d11731df11649`（= 其 `main` HEAD，无漂移），内联后 33 个文件
-- 产物仓库 `XiaoBai-ZH/rustdesk-custom`，最终 commit `c0e574e`
+- 产物仓库 `XiaoBai-ZH/rustdesk-custom`，最后一个**代码** commit `ef26f3d`（其后均为文档提交）
 - 有效构建 run `42749653883`：**29 job = 26 success + 2 skipped + 1 failure**（仅 flatpak，上游 apt 404）
 - 上游文件总数 **1134**（用 5.4 的过滤命令，已排除 `.gitmodules` 和 `libs/hbb_common` 这个 gitlink 条目），其中 hbb_common 内联 **33** 个文件
 - 本仓库跟踪 **1134** = 1134 − 1（删 `flutter-ci.yml`）+ 1（加本文档）
