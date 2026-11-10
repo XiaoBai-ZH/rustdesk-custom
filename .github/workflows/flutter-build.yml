@@ -1137,6 +1137,17 @@ jobs:
       - name: create unsigned dmg
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
+          # build.py:949 copies target/release/service into Contents/MacOS/ *after* Xcode has
+          # already ad-hoc signed the bundle, so the seal no longer matches: codesign reports
+          # "a sealed resource is missing or invalid" and macOS refuses to launch it as
+          # "damaged". Upstream only re-seals in the Developer ID step below, which is skipped
+          # when MACOS_P12_BASE64 is unset, so re-sign ad-hoc here with upstream's own script.
+          # It signs Frameworks, then Contents/MacOS/service, then the bundle with entitlements,
+          # and ends with codesign --verify --deep --strict, so a bad seal fails the step.
+          bash ./.github/scripts/sign-macos-app.sh \
+            ./flutter/build/macos/Build/Products/Release/RustDesk.app \
+            - \
+            ./flutter/macos/Runner/Release.entitlements
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
