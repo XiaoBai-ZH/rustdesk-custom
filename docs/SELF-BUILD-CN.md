@@ -2,7 +2,7 @@
 
 > **本文档的用途**：交给 AI，让它从零打出内置指定服务器的 RustDesk 客户端安装包。
 > **执行者假设**：能跑 bash、有 GitHub CLI 且已登录、有写权限的目标仓库。
-> **上次成功基线**：上游 `rustdesk/rustdesk` **1.5.3**（commit `95cca3f661f635b3cc85c04935fe8d96d8f432ef`），产物仓库 `XiaoBai-ZH/rustdesk-custom`，四平台全部验证通过。
+> **上次成功基线**：上游 `rustdesk/rustdesk` **1.5.3**（commit `95cca3f661f635b3cc85c04935fe8d96d8f432ef`），四平台产物全部验证通过。详见第 12 节。
 >
 > ⚠️ **行号会随上游变动。所有补丁都以「锚点字符串」定位，动手前必须先跑第 3.0 节的锚点自检。任一锚点失配就停下来重读上下文，不要盲套。**
 
@@ -29,18 +29,41 @@
 
 **任何一步失败都不要继续往下走**，先按第 10 节故障速查定位。锚点自检（T4）失配时**必须向用户报告并等待指示，不要自行猜测新补丁**。
 
+### 0.1 占位符对照表
+
+全文所有 `<尖括号>` 都是占位符，执行前必须替换。同一概念全文只用一种写法：
+
+| 占位符 | 含义 | 从哪来 |
+|---|---|---|
+| `<GH_OWNER>` | GitHub 用户名 | `gh api user --jq .login` |
+| `<REPO>` | 产物仓库名 | 自定，见 5.0 |
+| `<noreply邮箱>` | GitHub noreply 邮箱 | `gh api user/emails --jq '.[]\|select(.email\|endswith("users.noreply.github.com"))\|.email'` |
+| `<域名>` | 用户的服务器域名 | 第 1 节问用户 |
+| `<公钥>` | 用户的 44 字符 Ed25519 公钥 | 第 1 节问用户 |
+| `<ver>` | 上游版本号，如 `1.5.3` | `grep '^version' Cargo.toml` |
+| `<上游克隆目录>` | 上游克隆路径 | 全文统一用 `/tmp/rd/upstream` |
+| `<仓库工作树>` | 打补丁并推送的工作树 | 5.2 流程是 `/tmp/rd/build`，5.3 流程是克隆出的 `work/` |
+| `<卷名>` | macOS dmg 挂载后的卷名 | `ls /Volumes/`，形如 `rustdesk-<ver>-<arch>` |
+| `<arch>` | 架构后缀 | `x86_64` / `aarch64` / `armv7` |
+| `<RID>` | workflow run id | 第 6 节的取法 |
+| `<上面查到的size>` / `<期望大小>` | 资产字节数 | `gh api .../releases/tags/nightly` 的 `size` 字段 |
+| `<域名片段>` | 域名中用于模糊匹配的一小段，如 `xiaobai` 之于 `rd.xiaobai.com` | 从 `<域名>` 里截一段独特的 |
+| `<该平台的 librustdesk.so / .dll / .dylib 路径>` | 仅 7.0.1 可选增强用 | 见 7.3–7.6 各平台给出的实际路径 |
+
+**不是占位符**（不要替换）：`RwLock<String>` 等 Rust 泛型、`<host>` 出现在优先级链描述里表示"主机部分"、`$R` / `$RID` / `$F` / `$B` / `$WT` 等是 shell 变量。
+
 ---
 
 ## 1. 需要人提供的输入
 
 AI 无法自行获取，**开工前必须问齐**：
 
-| 变量 | 含义 | 示例 | 谁提供 / 怎么取 |
+| 变量 | 含义 | 示例（占位，非真实值） | 谁提供 / 怎么取 |
 |---|---|---|---|
-| `GH_OWNER` | GitHub 用户名 | `XiaoBai-ZH` | AI 自取：`gh api user --jq .login` |
-| `REPO` | 产物仓库名 | `rustdesk-custom` | AI 自定；用 5.0 判断是否已存在 |
+| `GH_OWNER` | GitHub 用户名 | `your-gh-user` | AI 自取：`gh api user --jq .login` |
+| `REPO` | 产物仓库名 | `rustdesk-selfhost` | AI 自定；用 5.0 判断是否已存在 |
 | `RENDEZVOUS_SERVER` | ID/信令服务器 | `rd.example.com:21116` | **问用户**。建议带端口，理由见 4.1 |
-| `RS_PUB_KEY` | 服务端 Ed25519 **公钥** | `9ngcOypZ…ml8=`（44 字符） | **问用户**，让其在服务器上执行下方命令后把输出贴过来 |
+| `RS_PUB_KEY` | 服务端 Ed25519 **公钥** | 44 字符 base64，形如 `OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=`（这是 RustDesk **官方**公钥，仅用于示范格式） | **问用户**，让其在服务器上执行下方命令后把输出贴过来 |
 | `API_SERVER` | API 地址 | `https://rd.example.com` | **问用户**。反代到容器 21114 的那个对外地址 |
 
 用户取公钥的命令（**AI 跑不了，必须由用户在其服务器上执行**）：
@@ -104,7 +127,7 @@ git -c credential.helper='!gh auth git-credential' push origin master
 # 问题 B：全局 user.email 可能是工作邮箱，提交到公开仓库会永久泄露
 # noreply 邮箱从这里取：
 gh api user/emails --jq '.[]|select(.email|endswith("users.noreply.github.com"))|.email'
-git -c user.name="<GitHub用户名>" -c user.email="<上面取到的noreply>" commit -m "..."
+git -c user.name="<GH_OWNER>" -c user.email="<noreply邮箱>" commit -m "..."
 ```
 
 先检查现状：
@@ -417,7 +440,7 @@ on:
 ```bash
 R=<GH_OWNER>/<REPO>
 gh secret set RENDEZVOUS_SERVER -R $R --app actions --body '<域名>:21116'
-gh secret set RS_PUB_KEY        -R $R --app actions --body '<44字符公钥>'
+gh secret set RS_PUB_KEY        -R $R --app actions --body '<公钥>'
 gh secret set API_SERVER        -R $R --app actions --body 'https://<域名>'
 gh secret list -R $R --app actions     # 只返回名字+时间戳，值不可读回
 ```
@@ -526,7 +549,7 @@ git add -A
 
 # 9. 提交（用 noreply 身份，见 2.2）
 git -c user.name="<GH_OWNER>" -c user.email="<noreply邮箱>" commit -q \
-  -m "rustdesk <版本号> with self-hosted server build-time injection"
+  -m "rustdesk <ver> with self-hosted server build-time injection"
 
 # 10. 建仓并推送
 gh repo create <REPO> --public --description "RustDesk with self-hosted server baked in"
@@ -562,7 +585,7 @@ git add -A
 #    若「仍缺失」里出现 flutter-ci.yml 和 docs/SELF-BUILD-CN.md 之外的任何条目 → 用 git add -f 补回
 
 # 8. 提交推送
-git -c user.name="<GH_OWNER>" -c user.email="<noreply邮箱>" commit -q -m "Update to rustdesk <新版本号>"
+git -c user.name="<GH_OWNER>" -c user.email="<noreply邮箱>" commit -q -m "Update to rustdesk <ver>"
 git -c credential.helper='!gh auth git-credential' push origin master
 ```
 
@@ -672,7 +695,7 @@ gh api "/repos/$R/actions/runs/$RID/jobs?per_page=100" \
 - `build-rustdesk-web` skipped（它自己写着 `if: False`）
 - `publish-signed-update-metadata` skipped 或不创建（`if` 含 `github.repository == 'rustdesk/rustdesk'`）
 
-也可用 `flutter-tag.yml`：推 tag 触发，例如 `git tag <版本号>-1 && git push origin <版本号>-1`。
+也可用 `flutter-tag.yml`：推 tag 触发，例如 `git tag <ver>-1 && git push origin <ver>-1`。
 ⚠️ tag 正则是 `'v?[0-9]+.[0-9]+.[0-9]+(-[0-9]+)?'`，**`-` 后面必须是数字**：`1.5.3-1` 匹配，`1.5.3-custom` **不匹配**。
 
 ---
@@ -748,7 +771,7 @@ done
 |---|---|
 | 你的域名 | ≥1 |
 | 你的公钥（44 字符） | 1 |
-| `https://<你的域名>` | ≥1 |
+| `https://<域名>` | ≥1 |
 | `OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=`（官方公钥） | **0** |
 | `admin.rustdesk.com` | **0** |
 | `rs-ny.rustdesk.com` | 1–2（**正常**，末级兜底常量，故意保留） |
@@ -758,7 +781,7 @@ done
 ```bash
 mkdir ex && cd ex && ar x ../rustdesk-*-x86_64.deb && tar xf data.tar.*
 B=usr/share/rustdesk/lib/librustdesk.so       # 约 56MB，这才是主体
-strings -a "$B" | grep -c "<你的域名>"
+strings -a "$B" | grep -c "<域名>"
 ```
 ⚠️ `usr/share/rustdesk/rustdesk` 只有 44KB，是启动器，**在它上面 strings 什么都搜不到**。
 
@@ -766,7 +789,7 @@ strings -a "$B" | grep -c "<你的域名>"
 
 ```bash
 unzip -o -q rustdesk-*-aarch64.apk 'lib/*' -d ax
-strings -a ax/lib/arm64-v8a/librustdesk.so | grep -c "<你的域名>"
+strings -a ax/lib/arm64-v8a/librustdesk.so | grep -c "<域名>"
 ```
 
 ### 7.5 Windows
@@ -778,7 +801,7 @@ AID=$(gh api "/repos/$R/actions/runs/$RID/artifacts?per_page=100" \
       --jq '.artifacts[]|select(.name=="rustdesk-unsigned-windows-x86_64")|.id')
 gh api "/repos/$R/actions/artifacts/$AID/zip" > win.zip
 unzip -q win.zip -d winx
-strings -a winx/librustdesk.dll | grep -c "<你的域名>"
+strings -a winx/librustdesk.dll | grep -c "<域名>"
 ```
 
 ### 7.6 macOS（有两个陷阱）
@@ -791,7 +814,7 @@ V=/Volumes/<卷名>          # ⚠️ 卷名是 rustdesk-<ver>-<arch>，不是 R
 B="$V/RustDesk.app/Contents/Frameworks/liblibrustdesk.dylib"
 
 # 陷阱 1：主体是 dylib，不是 Contents/MacOS/RustDesk（那个只有 148KB）
-strings -a "$B" | grep -c "<你的公钥>"        # 44 字符，能直接搜到
+strings -a "$B" | grep -c "<公钥>"        # 44 字符，能直接搜到
 
 # 陷阱 2：域名可能搜不到完整串！x86_64/arm64 codegen 会把短字符串拆成 8 字节 movabs 立即数
 #         内联进指令流，不放 .rodata。用分片搜：
@@ -1050,8 +1073,8 @@ done
 
 - 上游 `rustdesk/rustdesk` **1.5.3**，commit `95cca3f661f635b3cc85c04935fe8d96d8f432ef`（tag `1.5.3` 与 master HEAD 同一 commit）
 - `hbb_common` pin `fae47e024dd83cef6aaecde0aa7d11731df11649`（= 其 `main` HEAD，无漂移），内联后 33 个文件
-- 产物仓库 `XiaoBai-ZH/rustdesk-custom`，最后一个**代码** commit `ef26f3d`（其后均为文档提交）
-- 有效构建 run `42749653883`：**29 job = 26 success + 2 skipped + 1 failure**（仅 flatpak，上游 apt 404）
+- 产物仓库：一个普通公开仓库（非 fork），默认分支 `master`
+- 有效构建：**29 job = 26 success + 2 skipped + 1 failure**（唯一失败是 flatpak，上游 apt 404，见第 10 节）
 - 上游文件总数 **1134**（用 5.4 的过滤命令，已排除 `.gitmodules` 和 `libs/hbb_common` 这个 gitlink 条目），其中 hbb_common 内联 **33** 个文件
 - 本仓库跟踪 **1134** = 1134 − 1（删 `flutter-ci.yml`）+ 1（加本文档）
 - 四平台烧入值全部验证通过，macOS 签名 `valid on disk` + `satisfies its Designated Requirement`
@@ -1065,7 +1088,7 @@ done
 
 改动面核对：
 ```bash
-diff -rq --exclude=.git --exclude=SELF-BUILD-CN.md <上游克隆> <本仓库工作树>
+diff -rq --exclude=.git --exclude=SELF-BUILD-CN.md <上游克隆目录> <仓库工作树>
 # 应精确列出：flutter-build.yml / flutter-nightly.yml / flutter-tag.yml /
 #            libs/hbb_common/src/config.rs / libs/hbb_common/src/websocket.rs / src/common.rs  differ
 #            .gitmodules / .github/workflows/flutter-ci.yml  only in upstream
