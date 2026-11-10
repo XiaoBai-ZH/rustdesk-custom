@@ -8,19 +8,50 @@
 
 ---
 
+## 0. 总执行清单
+
+按顺序做，每步都有对应的详细章节。**不要跳步，尤其是 T3 和 T9。**
+
+| # | 任务 | 章节 | 产出/判据 |
+|---|---|---|---|
+| T1 | 向用户问齐 5 个输入值，校验公钥格式 | 1 | 5 个值到手，公钥校验脚本输出 `OK` |
+| T2 | 检查本机环境与 gh 权限 | 2 | `gh auth status` 含 `repo` + `workflow` |
+| T3 | 判断是首次建仓还是更新已有仓库 | 5.0 | 明确走 5.2 还是 5.3 |
+| T4 | 拉上游 + 内联 submodule + **跑锚点自检** | 3.0 / 5.2①-③ | 9 项锚点全部命中期望值 |
+| T5 | 打 9 处补丁、删 3 个文件 | 3.1–3.4 | `diff -rq` 结果与 12 节一致 |
+| T6 | **补回被 `.gitignore` 吞掉的文件** | 5.4 | 「仍缺失」只剩 `flutter-ci.yml`，「多出」为空 |
+| T7 | YAML 校验 → 提交 → 推送 → 核对远端 | 5.2⑤-⑧ / 5.5 | 全部 `OK`，无 `MISMATCH` |
+| T8 | 设 3 个 Secret，确认仓库设置 | 4 | `gh secret list` 显示 3 项 |
+| T9 | 触发构建，**立刻确认 job 数 > 0** | 6 | `total_count` ≈ 29，不是 `startup_failure` |
+| T10 | 监控到结束 | 6 | 27 success + 2 skipped（flatpak 可能失败，见 10 节） |
+| T11 | 按分级策略验证产物 | 7.0 | 选定 T0/T1/T2 并执行 |
+| T12 | 交付：告知该下哪个文件 + 安装注意事项 + 干净测试步骤 | 8 / 9 | 用户能自行完成验收 |
+
+**任何一步失败都不要继续往下走**，先按第 10 节故障速查定位。锚点自检（T4）失配时**必须向用户报告并等待指示，不要自行猜测新补丁**。
+
+---
+
 ## 1. 需要人提供的输入
 
 AI 无法自行获取，**开工前必须问齐**：
 
-| 变量 | 含义 | 示例 | 怎么取 |
+| 变量 | 含义 | 示例 | 谁提供 / 怎么取 |
 |---|---|---|---|
-| `GH_OWNER` | GitHub 用户名 | `XiaoBai-ZH` | `gh api user --jq .login` |
-| `REPO` | 产物仓库名 | `rustdesk-custom` | 已存在则复用 |
-| `RENDEZVOUS_SERVER` | ID/信令服务器 | `rd.example.com:21116` | 用户的服务端地址。**建议带端口**，理由见 4.1 |
-| `RS_PUB_KEY` | 服务端 Ed25519 **公钥** | `9ngcOypZ…ml8=`（44 字符） | `docker exec $(docker ps -qf ancestor=lejianwen/rustdesk-server-s6:latest) cat /data/id_ed25519.pub` |
-| `API_SERVER` | API 地址 | `https://rd.example.com` | 反代到容器 21114 的那个对外地址 |
+| `GH_OWNER` | GitHub 用户名 | `XiaoBai-ZH` | AI 自取：`gh api user --jq .login` |
+| `REPO` | 产物仓库名 | `rustdesk-custom` | AI 自定；用 5.0 判断是否已存在 |
+| `RENDEZVOUS_SERVER` | ID/信令服务器 | `rd.example.com:21116` | **问用户**。建议带端口，理由见 4.1 |
+| `RS_PUB_KEY` | 服务端 Ed25519 **公钥** | `9ngcOypZ…ml8=`（44 字符） | **问用户**，让其在服务器上执行下方命令后把输出贴过来 |
+| `API_SERVER` | API 地址 | `https://rd.example.com` | **问用户**。反代到容器 21114 的那个对外地址 |
+
+用户取公钥的命令（**AI 跑不了，必须由用户在其服务器上执行**）：
+
+```bash
+docker exec $(docker ps -qf ancestor=lejianwen/rustdesk-server-s6:latest) cat /data/id_ed25519.pub
+```
 
 **不需要**中继服务器地址——客户端会从 ID 服务器端口 +1 自动推导（`src/rendezvous_mediator.rs` 的 `get_relay_server()` 第三级兜底），或由 hbbs 下发。全仓无官方 relay 兜底。
+
+**如果用户说"和上次一样"**：上次的值无法从 Secret 读回（GitHub 只写不可读），必须让用户重新提供，或从上次交付的安装包里 `strings` 出来核对。
 
 ### 1.1 公钥格式校验（必做，填错会静默回落官方公钥）
 
@@ -154,16 +185,34 @@ pub const RS_PUB_KEY: &str = match option_env!("RS_PUB_KEY") {
 **③ `libs/hbb_common/src/websocket.rs` — 修 ws/wss 判定（在 `check_ws()` 内）**
 
 ```rust
-// 找这段
+// 原（在 check_ws() 函数内）
     let protocol = if is_domain {
         let api_server = Config::get_option("api-server");
         if api_server.starts_with("https") {
-// 在 let api_server = ... 之后插入
+            "wss"
+        } else {
+            "ws"
+        }
+    } else {
+        "ws"
+    };
+
+// 改为
+    let protocol = if is_domain {
+        let api_server = Config::get_option("api-server");
         let api_server = if api_server.is_empty() {
             option_env!("API_SERVER").unwrap_or("").to_owned()
         } else {
             api_server
         };
+        if api_server.starts_with("https") {
+            "wss"
+        } else {
+            "ws"
+        }
+    } else {
+        "ws"
+    };
 ```
 
 > **不打会怎样**：开启「使用 WebSocket」时（`allow-websocket = "Y"`，默认关闭），`check_ws()` 直接读原始选项、绕过 `get_api_server()`，选项为空 → 选 `ws://`（明文 80）→ HTTPS-only 反代连不上 → 客户端永远卡在「正在接入 RustDesk 网络...」。**这个症状极具误导性**：该提示反映的是 ID 服务器连通状态，不是 API 状态。
@@ -171,17 +220,22 @@ pub const RS_PUB_KEY: &str = match option_env!("RS_PUB_KEY") {
 **④ `src/common.rs` — 让 API_SERVER 生效（在 `get_api_server_()` 内）**
 
 ```rust
-// 找这段
+// 原（在 get_api_server_() 函数内）
     if !api.is_empty() {
         return api.to_owned();
     }
     let s0 = get_custom_rendezvous_server(custom);
-// 在两者之间插入
+
+// 改为
+    if !api.is_empty() {
+        return api.to_owned();
+    }
     if let Some(baked) = option_env!("API_SERVER") {
         if !baked.is_empty() {
             return baked.to_owned();
         }
     }
+    let s0 = get_custom_rendezvous_server(custom);
 ```
 
 > **不打会怎样**：API 会走推导得到 `http://<host>:21114`。若 21114 未对公网开放（走 HTTPS 反代的常见情况），登录/设备注册/地址簿同步全部失效。
@@ -190,13 +244,24 @@ pub const RS_PUB_KEY: &str = match option_env!("RS_PUB_KEY") {
 
 **⑤ env 块导出 3 个 secret**
 
-在 `env:` 块内（1.5.3 是 23–64 行，`jobs:` 之前）追加：
+定位：顶层 `env:` 块的**最后一行**是 `SIGN_BASE_URL`（3.0 自检的 ⑤ 就是它），紧接其后是空行和 `jobs:`。在 `SIGN_BASE_URL` 那行之后追加：
 
 ```yaml
+# 原
+  SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}-2"
+
+jobs:
+
+# 改为
+  SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}-2"
   RS_PUB_KEY: "${{ secrets.RS_PUB_KEY }}"
   RENDEZVOUS_SERVER: "${{ secrets.RENDEZVOUS_SERVER }}"
   API_SERVER: "${{ secrets.API_SERVER }}"
+
+jobs:
 ```
+
+⚠️ 缩进必须是 **2 个空格**（与其他 env 键对齐）。1.5.3 的 `env:` 块在 23–64 行，但**不要记行号**，用 `SIGN_BASE_URL` 定位。
 
 **⑥ 4 处 `run-on-arch-action` 加 `env:` 输入**
 
@@ -229,9 +294,19 @@ grep -n "uses: rustdesk-org/run-on-arch-action" .github/workflows/flutter-build.
 
 **⑦ macOS 打包前 ad-hoc 重签**
 
-在 `create unsigned dmg` 步骤的 `run:` **最开头**插入：
+在 `create unsigned dmg` 步骤的 `run: |` **第一行**插入重签调用，原有内容全部保留在其后：
 
 ```yaml
+# 原
+      - name: create unsigned dmg
+        if: env.UPLOAD_ARTIFACT == 'true'
+        run: |
+          CREATE_DMG="$(command -v create-dmg)"
+          CREATE_DMG="$(readlink -f "$CREATE_DMG")"
+          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          create-dmg --icon "RustDesk.app" 200 190 ...（略）
+
+# 改为（只在 run: | 下面加 4 行，其余一字不动）
       - name: create unsigned dmg
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
@@ -240,8 +315,14 @@ grep -n "uses: rustdesk-org/run-on-arch-action" .github/workflows/flutter-build.
             - \
             ./flutter/macos/Runner/Release.entitlements
           CREATE_DMG="$(command -v create-dmg)"
-          ...（原有内容不动）
+          CREATE_DMG="$(readlink -f "$CREATE_DMG")"
+          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
+          create-dmg --icon "RustDesk.app" 200 190 ...（略）
 ```
+
+⚠️ 缩进是 **10 个空格**（`run: |` 块内其他行的缩进）。三个参数依次是：app 路径、签名身份 `-`（ad-hoc）、entitlements 路径。
+
+⚠️ 只改 `create unsigned dmg` 这一步。**不要动**后面的 `Codesign app and create signed dmg`（它 gated on `MACOS_P12_BASE64`，自建时自动跳过）。
 
 > **不打会怎样**：`build.py` 里有一行 `cp -rf ../target/release/service .../RustDesk.app/Contents/MacOS/`，它在 Xcode 完成 ad-hoc 签名**之后**才把 9.97MB 的 `service` 塞进 bundle，封印清单不含它 → 签名损坏 → macOS 报**「已损毁，无法打开，应该移到废纸篓」**，且 `xattr -rd com.apple.quarantine` **完全无效**（因为坏的是签名不是隔离属性）。
 >
@@ -251,16 +332,41 @@ grep -n "uses: rustdesk-org/run-on-arch-action" .github/workflows/flutter-build.
 
 ### 3.3 工作流补丁（另外 2 个文件）
 
-**⑧ `flutter-nightly.yml` 和 `flutter-tag.yml` 各加 caller 级权限**
+**⑧ `flutter-nightly.yml` 和 `flutter-tag.yml` 各加 caller 级权限（两个文件都要改）**
 
 ```yaml
+# flutter-nightly.yml —— 原
 jobs:
-  run-flutter-nightly-build:            # flutter-tag.yml 里叫 run-flutter-tag-build
+  run-flutter-nightly-build:
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+
+# flutter-nightly.yml —— 改为
+jobs:
+  run-flutter-nightly-build:
     uses: ./.github/workflows/flutter-build.yml
     permissions:
-      contents: write                   # ← 加这两行
+      contents: write
     secrets: inherit
 ```
+
+```yaml
+# flutter-tag.yml —— 原
+jobs:
+  run-flutter-tag-build:
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+
+# flutter-tag.yml —— 改为
+jobs:
+  run-flutter-tag-build:
+    uses: ./.github/workflows/flutter-build.yml
+    permissions:
+      contents: write
+    secrets: inherit
+```
+
+⚠️ 两个文件的 job 名不同（`run-flutter-nightly-build` / `run-flutter-tag-build`），`permissions:` 块插在 `uses:` 之后、`secrets:` 之前，缩进 **4 个空格**（与 `uses:` 对齐），`contents: write` 缩进 6 个空格。
 
 > **不打会怎样**：`flutter-build.yml` 的 `generate-sbom` 和 `publish-signed-update-metadata` 声明了 `permissions: contents: write`。**可复用工作流的 token 不能超出调用方授予的范围**，而仓库默认 `default_workflow_permissions: read` → 整个 run **1 秒内 `startup_failure`，0 个 job，无日志，无 check run，GitHub 不给任何错误注解**。
 >
@@ -269,13 +375,20 @@ jobs:
 **⑨ `flutter-nightly.yml` 删掉定时触发**
 
 ```yaml
+# 原（上游完整内容）
 on:
-  schedule:                    # ← 删掉这三行
-    - cron: "0 0 * * *"        #
-  workflow_dispatch:           # ← 保留
+  schedule:
+    # schedule build every night
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+# 改为（删掉 schedule 及其注释和 cron 共 3 行）
+on:
+  workflow_dispatch:
 ```
 
 > 不删的话每天午夜自动跑一次完整构建（85 分钟）并覆盖 Release。
+> `flutter-tag.yml` 的触发器是 `workflow_dispatch` + `push: tags:`，**不需要改**。
 
 ### 3.4 要删除的文件
 
@@ -349,6 +462,19 @@ Free 计划月度额度 = $12   →  单次构建占 93%
 
 ## 5. 组装源码树并推送
 
+### 5.0 先判断走哪条路（必做）
+
+```bash
+R=<GH_OWNER>/<REPO>
+if gh repo view "$R" --json name >/dev/null 2>&1; then
+  echo "仓库已存在 → 走 5.3（更新流程）"
+else
+  echo "仓库不存在 → 走 5.2（首次建仓）"
+fi
+```
+
+两条路的差别只在「怎么把新树放进仓库」：**5.2 是 `git init` 新建历史，5.3 是克隆现有仓库后换入新树（保留历史，不需要 force push）**。补丁内容、锚点自检、5.4 的文件清单核对、5.5 的远端核对，两条路完全一样。
+
 ### 5.1 为什么内联 hbb_common
 
 `libs/hbb_common` 是上游**唯一**的 submodule，且是**纯 path 依赖**：
@@ -364,7 +490,7 @@ members = ["libs/scrap", "libs/hbb_common", ...]                    # 第 220 �
 ### 5.2 首次建仓
 
 ```bash
-# 1. 拉上游
+# 1. 拉上游（约 30MB，加 submodule 约 31MB）
 mkdir -p /tmp/rd && cd /tmp/rd
 git clone --depth 1 https://github.com/rustdesk/rustdesk.git upstream
 cd upstream && git submodule update --init --depth 1 libs/hbb_common
@@ -373,13 +499,16 @@ cd upstream && git submodule update --init --depth 1 libs/hbb_common
 mkdir -p /tmp/rd/build
 tar cf - --exclude=./.git . | (cd /tmp/rd/build && tar xf -)
 
-# 3. 内联 submodule + 删文件
+# 3. 内联 submodule + 删 3 个文件（清单见 3.4）
 cd /tmp/rd/build
 rm -f .gitmodules libs/hbb_common/.git .github/workflows/flutter-ci.yml
 
-# 4. 打第 3 节的全部补丁（先跑 3.0 锚点自检）
+# 4. 锚点自检（3.0 节）—— 就在 /tmp/rd/build 里跑，内容与上游一致
+#    9 项必须全部命中期望值；任一失配 → 停下报告用户，不要自行猜新补丁
 
-# 5. YAML 校验
+# 5. 打 9 处补丁（3.1 源码 4 处 + 3.2 工作流 3 处 + 3.3 工作流 2 处）
+
+# 6. YAML 校验（必须全部 OK）
 python3 -c "
 import yaml,os
 b='.github/workflows/'
@@ -388,15 +517,18 @@ for f in sorted(os.listdir(b)):
     except Exception as e: print('FAIL',f,e)
 "
 
-# 6. ⚠️ 关键：补回被 .gitignore 吞掉的文件（见 5.4）
-
-# 7. 初始化并提交
+# 7. 初始化并暂存
 git init -q -b master
 git add -A
-# ← 这里执行 5.4 的 git add -f
-git -c user.name="<GH_OWNER>" -c user.email="<noreply邮箱>" commit -q -m "<说明>"
 
-# 8. 建仓并推送
+# 8. ⚠️ 关键：补回被 .gitignore 吞掉的文件 —— 完整跑 5.4 节
+#    必须在 git add -A 之后、commit 之前做，否则漏掉的文件不会被提交
+
+# 9. 提交（用 noreply 身份，见 2.2）
+git -c user.name="<GH_OWNER>" -c user.email="<noreply邮箱>" commit -q \
+  -m "rustdesk <版本号> with self-hosted server build-time injection"
+
+# 10. 建仓并推送
 gh repo create <REPO> --public --description "RustDesk with self-hosted server baked in"
 git remote add origin https://github.com/<GH_OWNER>/<REPO>.git
 git -c credential.helper='!gh auth git-credential' push -u origin master
@@ -421,11 +553,15 @@ find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 # 5. 确认 .git 还是仓库自己的（应显示 origin 指向 <REPO>）
 git remote -v
 
-# 6. 暂存并核对文件清单（5.4）
+# 6. 暂存
 git add -A
-# ← 执行 5.4 的比对；此时多数文件已在 HEAD 里、.gitignore 不再影响，但仍要核对总数
 
-# 7. 提交推送
+# 7. 核对文件清单（5.4 节的比对部分）
+#    此时多数文件已在 HEAD 里、.gitignore 不再影响它们，但仍必须核对总数：
+#    上游清单数 应等于 本仓库暂存数 + 1（flutter-ci.yml）− 1（本文档）
+#    若「仍缺失」里出现 flutter-ci.yml 和 docs/SELF-BUILD-CN.md 之外的任何条目 → 用 git add -f 补回
+
+# 8. 提交推送
 git -c user.name="<GH_OWNER>" -c user.email="<noreply邮箱>" commit -q -m "Update to rustdesk <新版本号>"
 git -c credential.helper='!gh auth git-credential' push origin master
 ```
@@ -451,41 +587,58 @@ echo "实际暂存数: $(wc -l < new_all.txt)"
 # 找出被吞掉的
 comm -23 /tmp/up_all.txt /tmp/new_all.txt > /tmp/missing.txt
 echo "被吞掉: $(wc -l < /tmp/missing.txt) 个"
-cat /tmp/missing.txt | head -20      # 人工看一眼，确认没有你故意删的文件
+cat /tmp/missing.txt | head -20
+# 人工看一眼：这里应该包含 .github/workflows/flutter-ci.yml（故意删的），
+# 其余全部是被 .gitignore 误伤的、必须补回的文件
 
 # 强制补回（排除故意删除的 flutter-ci.yml）
 grep -v '^\.github/workflows/flutter-ci\.yml$' /tmp/missing.txt \
   | tr '\n' '\0' | xargs -0 git add -f
 
-# 复核：应只剩故意删的那几个
+# 复核
 git diff --cached --name-only | sort > new_all2.txt
-echo "--- 仍缺失（应只有 flutter-ci.yml 和 libs/hbb_common 这个 gitlink 条目）---"
+echo "--- 仍缺失（应只有 .github/workflows/flutter-ci.yml 这一条）---"
 comm -23 /tmp/up_all.txt /tmp/new_all2.txt
-echo "--- 多出（应为空）---"
+echo "--- 多出（首次建仓应为空；更新流程应只有 docs/SELF-BUILD-CN.md）---"
 comm -13 /tmp/up_all.txt /tmp/new_all2.txt
 
 # hbb_common 内联文件数核对
 echo "上游 submodule: $(wc -l < /tmp/up_sub.txt)  实际暂存: $(git diff --cached --name-only | grep -c '^libs/hbb_common/')"
-# 两个数字必须相等
+# 两个数字必须相等（1.5.3 时都是 33）
 ```
+
+> 注：上面第 4 行已经把 `.gitmodules` 和 `libs/hbb_common` 这个 gitlink 条目从上游清单里过滤掉了，所以「仍缺失」里**不应该**再出现它们。
 
 ### 5.5 推送后核对远端
 
 ```bash
 R=<GH_OWNER>/<REPO>
+# WT = 你实际推送的那个工作树：5.2 流程是 /tmp/rd/build，5.3 流程是克隆出来的 work/
+WT=/tmp/rd/build
+
 # 逐个补丁文件与本地比对
 for f in libs/hbb_common/src/config.rs libs/hbb_common/src/websocket.rs src/common.rs .github/workflows/flutter-build.yml .github/workflows/flutter-nightly.yml .github/workflows/flutter-tag.yml; do
   printf "%-50s " "$f"
   gh api "/repos/$R/contents/$f?ref=master" --jq '.content' | base64 -d \
-    | diff -q - "/tmp/rd/build/$f" >/dev/null && echo "OK" || echo "MISMATCH"
+    | diff -q - "$WT/$f" >/dev/null && echo "OK" || echo "MISMATCH"
 done
+# 6 个必须全部 OK
+
 # 确认删除生效
 for f in .gitmodules .github/workflows/flutter-ci.yml; do
   printf "%-50s " "$f"
   gh api "/repos/$R/contents/$f?ref=master" 2>&1 | grep -q "Not Found" && echo "已删除" || echo "仍存在"
 done
+# 2 个必须都是「已删除」
+
 # 确认 hbb_common 是普通目录不是 submodule
 gh api "/repos/$R/contents/libs/hbb_common?ref=master" --jq 'if type=="array" then "dir OK" else "仍是 submodule" end'
+# 必须输出 dir OK
+
+# 确认 4 处容器 env 都到位（工作流级 1 处带引号 + 容器级 4 处不带引号）
+gh api "/repos/$R/contents/.github/workflows/flutter-build.yml?ref=master" --jq '.content' | base64 -d > /tmp/fb.yml
+echo "工作流级(应1): $(grep -c 'RENDEZVOUS_SERVER: "\${{ secrets.RENDEZVOUS_SERVER }}"' /tmp/fb.yml)"
+echo "容器级(应4):   $(grep -c 'RENDEZVOUS_SERVER: \${{ secrets.RENDEZVOUS_SERVER }}$' /tmp/fb.yml)"
 ```
 
 ---
@@ -502,7 +655,7 @@ gh workflow run "Flutter Nightly Build" -R $R --ref master
 sleep 20
 RID=$(gh run list -R $R --workflow "Flutter Nightly Build" --limit 1 --json databaseId --jq '.[0].databaseId')
 
-# ⚠️ 立刻确认 job 被创建了（防坑 #4 的 startup_failure）
+# ⚠️ 立刻确认 job 被创建了（防补丁 ⑧ 缺失导致的 startup_failure）
 gh api "/repos/$R/actions/runs/$RID" --jq '{status:.status,conclusion:(.conclusion//"-")}'
 gh api "/repos/$R/actions/runs/$RID/jobs?per_page=100" --jq '.total_count'
 # conclusion 若是 startup_failure 且 total_count 为 0 → 检查补丁 ⑧ 是否漏了
@@ -519,13 +672,14 @@ gh api "/repos/$R/actions/runs/$RID/jobs?per_page=100" \
 - `build-rustdesk-web` skipped（它自己写着 `if: False`）
 - `publish-signed-update-metadata` skipped 或不创建（`if` 含 `github.repository == 'rustdesk/rustdesk'`）
 
-也可用 `flutter-tag.yml`：推 tag `1.5.3-1` 触发（正则要求 `-` 后是数字，`1.5.3-custom` **不匹配**）。
+也可用 `flutter-tag.yml`：推 tag 触发，例如 `git tag <版本号>-1 && git push origin <版本号>-1`。
+⚠️ tag 正则是 `'v?[0-9]+.[0-9]+.[0-9]+(-[0-9]+)?'`，**`-` 后面必须是数字**：`1.5.3-1` 匹配，`1.5.3-custom` **不匹配**。
 
 ---
 
 ## 7. 验证产物（必做，构建全绿 ≠ 产物正确）
 
-> **上次踩过的最贵的坑**：构建 27 个 job 全绿，但 Linux 全部产物烧的是官方服务器（坑 #5）。**构建成功不代表产物正确。**
+> **上次踩过的最贵的坑**：构建 27 个 job 全绿，但 Linux 全部产物烧的是官方服务器（补丁 ⑥ 缺失）。**构建成功不代表产物正确。**
 
 ### 7.0 分级验证策略：不是每次都要下载全部安装包
 
@@ -538,8 +692,8 @@ gh api "/repos/$R/actions/runs/$RID/jobs?per_page=100" \
 **为什么 T1 通常够**：4 处源码补丁是**全平台共用**的同一份代码，`option_env!` 是编译期确定的。只要有一个平台的二进制里值正确，就说明补丁本身生效了。
 
 **但 T1 不足以覆盖的两类问题**（这正是上次踩的坑）：
-- **平台特有的传递断链**：坑 #5 就是 Linux 独有（容器不继承 env），其他三个平台全对。所以**改过补丁 ⑥ 之后必须验 Linux**。
-- **打包环节的问题**：坑 #7 是 macOS 独有（签名封印），二进制内容完全正确但包装坏了。所以**改过补丁 ⑦ 之后必须验 macOS 签名**。
+- **平台特有的传递断链**：补丁 ⑥ 对应的容器 env 问题就是 Linux 独有，其他三个平台全对。所以**改过补丁 ⑥ 之后必须验 Linux**。
+- **打包环节的问题**：补丁 ⑦ 对应的签名封印问题是 macOS 独有，二进制内容完全正确但包装坏了。所以**改过补丁 ⑦ 之后必须验 macOS 签名**。
 
 **结论**：补丁不变 → T1；补丁有变 → 变动涉及哪个平台就加验哪个；首次或大版本 → T2。
 
@@ -651,7 +805,7 @@ api-serverhttps://<域名>websocket-port       ← websocket.rs 的 check_ws 补
 rustdesk.<域名>:21116                        ← PROD_RENDEZVOUS_SERVER 生效
 ```
 
-**签名校验（必做，防坑 #7 回归）：**
+**签名校验（必做，防补丁 ⑦ 回归）：**
 ```bash
 codesign --verify --deep --strict --verbose=2 "$V/RustDesk.app"
 # 必须输出：valid on disk  +  satisfies its Designated Requirement
@@ -808,7 +962,7 @@ openssl pkcs7 -inform DER -in /tmp/c.rsa -print_certs -noout
 | `Build flatpak` 失败，`apt` 报 `404 Not Found` | Ubuntu 镜像源下架了容器索引里的包版本，**上游基础设施问题** | 忽略，或重跑一次 |
 | run 结论 `failure` 但所有 job 都 success，且 `gh run rerun --failed` 报 `cannot be retried` | GitHub 侧偶发，部分 job 未展开进 job 图（`publish_unsigned` 等） | 重新触发一次即恢复；不影响安装包 |
 | 下载的文件 `hdiutil` 报「无可装载的文件系统」/ `unzip` 报找不到目录 | 下载被截断 | 7.1 断点续传 + digest 校验 |
-| `gh api` 改工作流文件报 `refusing to allow an OAuth App to create or update workflow` | token 缺 `workflow` scope | `gh auth refresh -h github.com -s workflow` |
+| `gh api` 改工作流文件报 `refusing to allow an OAuth App to create or update workflow` | token 缺 `workflow` scope | `gh auth refresh -h github.com -s repo,workflow`（见 2.1） |
 | `git push` 卡在交互式认证 | `credential.helper` 为空 | 2.2 内联 helper |
 
 ---
@@ -858,7 +1012,7 @@ openssl pkcs7 -inform DER -in /tmp/c.rsa -print_certs -noout
 | 状态提示「正在接入 RustDesk 网络...」 | `src/lang/cn.rs` | `connecting_status` | 10 |
 | └ 由 `status_num==0` 驱动 | `flutter/lib/desktop/pages/connection_page.dart` | `SvcStatus.connecting;` | 175 |
 
-**关于最后两行**：`status_num` 来自服务进程的 `OnlineStatus`（`src/ui_interface.rs` 的 `UI_STATUS`），反映的是 **ID 服务器连通状态，不是 API 状态**。所以 API 配置错误也可能表现成这个提示——排查时不要被字面意思带偏（坑 #6 就是这样）。
+**关于最后两行**：`status_num` 来自服务进程的 `OnlineStatus`（`src/ui_interface.rs` 的 `UI_STATUS`），反映的是 **ID 服务器连通状态，不是 API 状态**。所以 API 配置错误也可能表现成这个提示——排查时不要被字面意思带偏（补丁 ③ 对应的 WebSocket 问题就是这样：明明是 API 层的毛病，却显示成 ID 层连不上）。
 
 一次性定位全部（复制即用）：
 
