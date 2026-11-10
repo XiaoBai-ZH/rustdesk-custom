@@ -790,3 +790,63 @@ src/common.rs                         1 处 option_env! 补丁
 ```bash
 diff -rq --exclude=.git <上游克隆> <本仓库工作树>
 ```
+
+---
+
+## 附录 A. 本次验证记录（作为下次的对照基线）
+
+最终产物来自 run `42749653883`（commit `ef26f3d`），Release tag `nightly`。
+
+### A.1 构建结果
+
+```
+29 job = 26 success + 2 skipped + 1 failure
+耗时 145min（含 flatpak 重试等待）
+唯一失败：Build flatpak x86_64-unknown-linux-gnu —— Ubuntu 镜像源 perl 404，见坑 #10，与本仓库无关
+```
+
+### A.2 各平台烧入值验证
+
+判据：你的域名/公钥/API 命中，官方公钥 `OeVuKk5…` 与 `admin.rustdesk.com` 为 **0**。
+
+| 平台 | 被检文件 | 域名 | 公钥 | API | 官方公钥 | admin |
+|---|---|---|---|---|---|---|
+| Linux | `.deb` → `usr/share/rustdesk/lib/librustdesk.so` | 1 | 1 | 1 | **0** | **0** |
+| Android | `.apk` → `lib/arm64-v8a/librustdesk.so` | 2 | 1 | 1 | **0** | **0** |
+| Windows | artifact → `librustdesk.dll` | 2 | 1 | 1 | **0** | **0** |
+| macOS | `.dmg` → `Contents/Frameworks/liblibrustdesk.dylib` | 分片 | 1 | 分片 | **0** | **0** |
+
+macOS 的分片实测输出（证明两处 `API_SERVER` 引用都在）：
+```
+:21114allow-https-21114https://<域名>          ← src/common.rs get_api_server_ 补丁
+api-serverhttps://<域名>websocket-port          ← websocket.rs check_ws 补丁
+rustdesk.<域名>:21116                           ← PROD_RENDEZVOUS_SERVER
+```
+
+`rs-ny.rustdesk.com` 在各平台均有 1–2 次命中，**属预期**（末级兜底常量，故意保留）。
+
+### A.3 macOS 签名验证
+
+```
+codesign --verify --deep --strict --verbose=2 RustDesk.app
+  → valid on disk
+  → satisfies its Designated Requirement
+
+bundle:  Signature=adhoc  flags=0x10002(adhoc,runtime)  TeamIdentifier=not set
+service: Signature=adhoc  flags=0x10002(adhoc,runtime)   ← 已封印
+entitlements: app-sandbox=false, allow-jit=true, audio-input=true, network.client=true  ← 4 项全保留
+spctl -a -vvv -t install → rejected   ← 预期（无公证），清 quarantine 或走系统设置「仍要打开」即可
+```
+
+### A.4 权威摘要（用于校验下载完整性）
+
+```
+rustdesk-1.5.3-aarch64.dmg   31348944 字节   sha256:a57cd0391b421ac131e6a544419a27c3fd3f955f677db8b43d36f43bf456de85
+```
+
+取值命令（每次构建后都会变）：
+```bash
+gh api "/repos/<owner>/<repo>/releases/tags/nightly" \
+  --jq '.assets[]|{name:.name,size:.size,digest:.digest}'
+```
+
